@@ -303,7 +303,25 @@ def parse_response(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def classify_text(client: OpenAI, text: str, model: str, max_retries: int = 5) -> dict:
+def _empty_result(parse_error: str = "") -> dict:
+    """Return a result dict with all fields set to None and an optional parse_error."""
+    return {
+        **{name: None for name in DIMENSION_NAMES},
+        "Dimensions_evidenced": None,
+        "RAW": None,
+        "DENOM": None,
+        "NDS": None,
+        "Dream_favoring_signals": None,
+        "Wakefulness_favoring_signals": None,
+        "Classification": None,
+        "Confidence": None,
+        "Reasoning": None,
+        "Parse_error": parse_error,
+    }
+
+
+def classify_text(client: OpenAI, text: str, model: str, max_tokens: int = 2048,
+                  max_retries: int = 5) -> dict:
     """Send text to the LLM and return parsed result dict."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -316,26 +334,14 @@ def classify_text(client: OpenAI, text: str, model: str, max_retries: int = 5) -
                 model=model,
                 messages=messages,
                 temperature=0,
-                max_tokens=1024,
+                max_tokens=max_tokens,
             )
             raw_output = response.choices[0].message.content
             result = parse_response(raw_output)
             return result
         except Exception as exc:
             if attempt == max_retries:
-                return {
-                    **{name: None for name in DIMENSION_NAMES},
-                    "Dimensions_evidenced": None,
-                    "RAW": None,
-                    "DENOM": None,
-                    "NDS": None,
-                    "Dream_favoring_signals": None,
-                    "Wakefulness_favoring_signals": None,
-                    "Classification": None,
-                    "Confidence": None,
-                    "Reasoning": None,
-                    "Parse_error": f"API error after {max_retries} attempts: {exc}",
-                }
+                return _empty_result(f"API error after {max_retries} attempts: {exc}")
             time.sleep(delay)
             delay *= 2
 
@@ -381,6 +387,10 @@ def main():
     )
     parser.add_argument("--model", default="gpt-4o-mini", help="OpenAI model name")
     parser.add_argument(
+        "--max-tokens", type=int, default=2048,
+        help="Maximum tokens for LLM response (default: 2048)",
+    )
+    parser.add_argument(
         "--batch-size", type=int, default=50, help="Rows to accumulate before flushing to disk"
     )
     parser.add_argument(
@@ -403,10 +413,18 @@ def main():
     input_path = Path(args.input)
     output_path = Path(args.output)
 
-    # Read input
+    # Read input — use 'replace' for decode errors but warn so data quality issues are visible
     with input_path.open(encoding="utf-8-sig", errors="replace", newline="") as f:
-        reader = csv.DictReader(f, delimiter=";")
-        all_rows = [r for r in reader if r.get("txt_cleaned", "").strip()]
+        content = f.read()
+    if "\ufffd" in content:
+        print(
+            "Warning: replacement characters (U+FFFD) found in input — some bytes could not be "
+            f"decoded as UTF-8 in {input_path.name}. Verify encoding if results look garbled.",
+            file=sys.stderr,
+        )
+    import io
+    reader = csv.DictReader(io.StringIO(content), delimiter=";")
+    all_rows = [r for r in reader if r.get("txt_cleaned", "").strip()]
 
     print(f"Loaded {len(all_rows)} non-empty rows from {input_path.name}")
 
@@ -432,7 +450,7 @@ def main():
     errors = 0
 
     def process_row(row):
-        result = classify_text(client, row["txt_cleaned"], args.model)
+        result = classify_text(client, row["txt_cleaned"], args.model, args.max_tokens)
         out_row = {"txt_cleaned": row["txt_cleaned"], "CodeGpt": row["CodeGpt"], **result}
         return out_row
 
